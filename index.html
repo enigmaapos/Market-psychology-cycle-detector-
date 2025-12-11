@@ -1778,49 +1778,96 @@ function explainBlowoff(item){
    NEW: Sorting helpers — inserted now
    ============================================================ */
 
-// ------- Sorting helper (NEW) -------
+// ------- Sorting helper (fixed & backward-compatible) -------
 function applySort(results){
-  const field = el.sortField.value || 'score';
-  const order = el.sortOrder.value === 'asc' ? 1 : -1;
+  // support either "sortField"/"sortOrder" OR "sortBy"/"sortDir" depending on which DOM you loaded
+  const sortFieldEl = el.sortField || el.sortBy || document.getElementById('sortField') || document.getElementById('sortBy');
+  const sortOrderEl = el.sortOrder || el.sortDir || document.getElementById('sortOrder') || document.getElementById('sortDir');
 
-  // getter for primary field
+  const field = (sortFieldEl && (sortFieldEl.value || sortFieldEl.getAttribute && sortFieldEl.getAttribute('value'))) ? sortFieldEl.value : 'score';
+  // normalize order: 'asc' -> 1, otherwise desc -> -1
+  const order = (sortOrderEl && (sortOrderEl.value || sortOrderEl.innerText)) 
+                ? ((String(sortOrderEl.value || sortOrderEl.innerText).toLowerCase().includes('asc')) ? 1 : -1)
+                : -1;
+
+  // getter for primary field (returns a value usable for comparison)
   const getter = (r) => {
-    if(field === 'score') return r.score ?? -Infinity;
-    if(field === 'volSpike') return r.volSpike ?? -Infinity;
-    if(field === 'wickRatio') return r.wickRatio ?? -Infinity;
-    if(field === 'ema70DistPct') return r.ema70DistPct ?? -Infinity;
-    if(field === 'rsi4h') return r.rsi4h ?? -Infinity;
-    if(field === 'rsi1d') return r.rsi1d ?? -Infinity;
-    if(field === 'funding') return r.funding ?? -Infinity;
-    if(field === 'last') return r.last ?? -Infinity;
-    if(field === 'change24') return r.change24 ?? -Infinity;
-    return r.score ?? -Infinity;
+    // use null/undefined -> special marker handled below
+    switch(field){
+      case 'score': return (typeof r.score === 'number') ? r.score : null;
+      case 'volSpike': return (typeof r.volSpike === 'number') ? r.volSpike : null;
+      case 'wickRatio': return (typeof r.wickRatio === 'number') ? r.wickRatio : null;
+      case 'ema70DistPct': return (typeof r.ema70DistPct === 'number') ? r.ema70DistPct : null;
+      case 'rsi4h': return (typeof r.rsi4h === 'number') ? r.rsi4h : null;
+      case 'rsi1d': return (typeof r.rsi1d === 'number') ? r.rsi1d : null;
+      case 'funding': return (typeof r.funding === 'number') ? r.funding : null;
+      case 'last': return (typeof r.last === 'number') ? r.last : null;
+      case 'change24': return (typeof r.change24 === 'number') ? r.change24 : null;
+      case 'symbol': return (typeof r.symbol === 'string') ? r.symbol : null;
+      default: return (typeof r.score === 'number') ? r.score : null;
+    }
   };
 
-  // sort with primary key then stable tie-breakers (score desc, volSpike desc, ema70DistPct desc)
-  results.sort((a,b)=>{
+  // robust comparator: handle nulls, numbers, strings, and ensure tie-breakers applied in descending sense
+  results.sort((a,b) => {
     const va = getter(a);
     const vb = getter(b);
 
-    const na = (va === null || va === undefined || Number.isNaN(va));
-    const nb = (vb === null || vb === undefined || Number.isNaN(vb));
-    if(na && nb) return 0;
-    if(na) return 1 * order; // push missing to end
-    if(nb) return -1 * order;
-
-    // compare primary
-    if(typeof va === 'string' && typeof vb === 'string'){
-      const cmp = va.localeCompare(vb);
-      if(cmp !== 0) return cmp * order;
+    const aMissing = (va === null || va === undefined || Number.isNaN(va));
+    const bMissing = (vb === null || vb === undefined || Number.isNaN(vb));
+    if(aMissing && bMissing) {
+      // both missing — fallback to tie-breaker directly
+    } else if(aMissing) {
+      return 1 * order; // push a to end
+    } else if(bMissing) {
+      return -1 * order; // push b to end
     } else {
-      if(vb - va !== 0) return (va - vb) * order;
+      // both present: compare appropriately
+      if(typeof va === 'string' && typeof vb === 'string'){
+        const cmp = va.localeCompare(vb);
+        if(cmp !== 0) return cmp * order;
+      } else {
+        // numeric compare (va, vb are numbers)
+        if(vb - va !== 0) return (va - vb) * order;
+      }
     }
 
-    // tie-breakers (always descending where meaningful)
-    const tie = (b.score - a.score) || (b.volSpike - a.volSpike) || (b.ema70DistPct - a.ema70DistPct);
-    return tie;
+    // tie-breakers (apply in consistent descending importance)
+    // we compute tie result as positive -> keep original a before b (descending)
+    const tieScore = ((b.score || 0) - (a.score || 0));
+    if(tieScore !== 0) return tieScore; // always prefer higher score first
+
+    const tieVol = ((b.volSpike || 0) - (a.volSpike || 0));
+    if(tieVol !== 0) return tieVol;
+
+    const tieEma = ((b.ema70DistPct || 0) - (a.ema70DistPct || 0));
+    if(tieEma !== 0) return tieEma;
+
+    // final stable fallback: alphabetical by symbol
+    if(a.symbol && b.symbol) return a.symbol.localeCompare(b.symbol);
+
+    return 0;
   });
 }
+
+// ---- wire sort control listeners robustly (supports either naming) ----
+(function wireSortListeners(){
+  const sortFieldEl = el.sortField || el.sortBy || document.getElementById('sortField') || document.getElementById('sortBy');
+  const sortOrderEl = el.sortOrder || el.sortDir || document.getElementById('sortOrder') || document.getElementById('sortDir');
+
+  if(sortFieldEl) sortFieldEl.addEventListener('change', ()=>{ if(window.lastScanResults) { applySort(window.lastScanResults); if(window.innerWidth>=680) renderTable(window.lastScanResults); else renderCards(window.lastScanResults); } });
+  if(sortOrderEl) {
+    // support select or a toggle button (if button we toggle its innerText and then re-render)
+    sortOrderEl.addEventListener('change', ()=>{ if(window.lastScanResults) { applySort(window.lastScanResults); if(window.innerWidth>=680) renderTable(window.lastScanResults); else renderCards(window.lastScanResults); } });
+    // if it's a button that toggles text like "Desc"/"Asc", also accept clicks
+    if(sortOrderEl.tagName && sortOrderEl.tagName.toLowerCase() === 'button'){
+      sortOrderEl.addEventListener('click', ()=>{
+        sortOrderEl.innerText = (String(sortOrderEl.innerText).toLowerCase().includes('asc')) ? 'Desc' : 'Asc';
+        if(window.lastScanResults){ applySort(window.lastScanResults); if(window.innerWidth>=680) renderTable(window.lastScanResults); else renderCards(window.lastScanResults); }
+      });
+    }
+  }
+})();
 
 
 /* ============================================================
@@ -2385,11 +2432,6 @@ el.startBtn.addEventListener('click', ()=>{ if(running) return; prevBlowoffSet =
 el.stopBtn.addEventListener('click', ()=>{ running=false; queue=[]; el.startBtn.disabled=false; el.stopBtn.disabled=true; if(autoTimer) clearTimeout(autoTimer); if(countdownTimer) clearInterval(countdownTimer); el.countdown.innerText='Next scan in: -'; el.message.innerText='Stopped.'; });
 el.oneShot.addEventListener('click', ()=>{ if(running) return; runScan(true); });
 el.sensitivity.addEventListener('input', ()=>{ el.sensVal.innerText = el.sensitivity.value; });
-
-  // Sorting controls: re-render on change
-el.sortField.addEventListener('change', ()=>{ if(window.lastResults) renderResults(window.lastResults); });
-el.sortOrder.addEventListener('change', ()=>{ if(window.lastResults) renderResults(window.lastResults); });
-  
 if('Notification' in window){ try{ Notification.requestPermission().catch(()=>{}); } catch(e){} }
 (async function ping(){ try{ await fetch(API_BASE + '/fapi/v1/ping'); } catch(e){ console.warn('ping failed', e); } })();
 
