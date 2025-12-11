@@ -3,19 +3,18 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Perp Consolidation Detector — Binance Futures (USDT)</title>
+  <title>Perp Consolidation Detector — All USDT Perpetuals</title>
   <style>
     body{font-family:Inter, Roboto, Arial; background:#0f1720; color:#e6eef8; margin:12px}
-    .card{background:#0b1220;border-radius:10px;padding:12px;box-shadow:0 6px 20px rgba(0,0,0,0.5);max-width:980px}
+    .card{background:#0b1220;border-radius:10px;padding:12px;box-shadow:0 6px 20px rgba(0,0,0,0.5);max-width:1200px}
     label,input,button,select{font-size:14px}
     input,select{padding:6px;margin-right:6px;background:#071021;border:1px solid #172033;color:#d6e7ff;border-radius:6px}
     button{padding:8px 10px;border-radius:8px;border:none;background:#1f8cff;color:#fff;cursor:pointer}
-    .log{background:#06121a;padding:8px;border-radius:6px;margin-top:10px;min-height:120px;overflow:auto}
+    .log{background:#06121a;padding:8px;border-radius:6px;margin-top:10px;min-height:160px;overflow:auto}
     .signal{padding:8px;border-radius:6px;margin-top:8px}
     .signal.ok{background:#08331a;color:#a6f7be}
     .signal.warn{background:#3a2a0f;color:#ffd9a5}
     .signal.bad{background:#3a0f0f;color:#ffbdbd}
-    .status{margin-left:8px;font-size:13px;color:#94a3b8}
     .row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
     .meta{margin-top:8px;color:#94a3b8;font-size:13px}
     .status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}
@@ -23,16 +22,14 @@
     .status-stopped{background:#ef4444}
     .status-idle{background:#94a3b8}
     .small{font-size:12px;color:#9fb5d6}
+    .summary{margin-top:8px;color:#9fb5d6;font-size:13px}
   </style>
 </head>
 <body>
   <div class="card">
-    <h2>Perp Consolidation & Breakout Detector (HTML)</h2>
-    <p>Connects to Binance Futures WebSocket for <strong>symbol</strong> + <strong>interval</strong>, detects consolidation and signals breakout with volume confirmation.</p>
+    <h2>Perp Consolidation & Breakout Detector — All USDT Perpetuals (Demo)</h2>
 
     <div class="row">
-      <label>Symbol</label>
-      <input id="symbol" value="btcusdt" />
       <label>Interval</label>
       <select id="interval">
         <option value="1m">1m</option>
@@ -41,29 +38,27 @@
         <option value="15m">15m</option>
         <option value="1h">1h</option>
       </select>
+
       <label>Lookback</label>
       <input id="lookback" value="24" style="width:64px" />
+
       <label>StdTh</label>
       <input id="stdTh" value="0.004" style="width:80px" />
-      <button id="start">Start</button>
+
+      <label>Batch size</label>
+      <input id="batchSize" value="60" style="width:64px" />
+
+      <button id="start">Start (all USDT perp)</button>
       <button id="stop">Stop</button>
     </div>
 
     <div class="meta">
-      <span id="wsUrl" class="small"></span>
-      <div style="margin-top:6px">
-        <span class="status-dot status-idle" id="statusDot"></span>
-        <span id="statusText" class="small">idle</span>
+      <div class="summary">
+        This demo will fetch the Binance futures exchange info, find symbols that are USDT perpetual contracts, then open combined websocket streams in batches.
       </div>
-    </div>
-
-    <div style="margin-top:10px">
-      <strong>How it works (defaults):</strong>
-      <ul>
-        <li>Collects `lookback` kline candles (close, high, low, volume).</li>
-        <li>Consolidation detected when close-price std dev relative to mean &lt; <code>stdTh</code> and ATR small and EMA spread compressed.</li>
-        <li>Breakout confirmed when price closes above consolidation resistance and volume &gt; volumeMA * 1.5.</li>
-      </ul>
+      <div style="margin-top:6px">
+        <span id="info" class="small"></span>
+      </div>
     </div>
 
     <div class="log" id="log"></div>
@@ -71,35 +66,19 @@
   </div>
 
 <script>
-// Diagnostics first: helpful messages to UI + console
 (function(){
   const logEl = document.getElementById('log');
   const signalsEl = document.getElementById('signals');
-  const wsUrlEl = document.getElementById('wsUrl');
-  const statusDot = document.getElementById('statusDot');
-  const statusText = document.getElementById('statusText');
-
-  let ws = null;
+  const infoEl = document.getElementById('info');
+  let connections = []; // {ws, batchSymbols, url}
   let running = false;
+  let allSymbols = [];
 
   function now(){ return new Date().toLocaleTimeString(); }
-  function uiLog(msg){
-    logEl.innerHTML = `<div>[${now()}] ${msg}</div>` + logEl.innerHTML;
-    console.log(`[Detector] ${msg}`);
-  }
-  function setSignal(msg, level='ok'){
-    const el = document.createElement('div');
-    el.className = `signal ${level}`;
-    el.textContent = `${now()} — ${msg}`;
-    signalsEl.prepend(el);
-    console.log(`[Signal:${level}] ${msg}`);
-  }
-  function setStatus(text, cls='idle'){
-    statusText.textContent = text;
-    statusDot.className = 'status-dot ' + (cls==='running'? 'status-running' : cls==='stopped' ? 'status-stopped' : 'status-idle');
-  }
+  function uiLog(msg){ logEl.innerHTML = `<div>[${now()}] ${msg}</div>` + logEl.innerHTML; console.log(msg); }
+  function setSignal(msg, level='ok'){ const el=document.createElement('div'); el.className=`signal ${level}`; el.textContent=`${now()} — ${msg}`; signalsEl.prepend(el); console.log('signal', level, msg); }
 
-  // Small helpers (same logic as before)
+  // small indicators & analysis functions (same as earlier)
   function ema(values, period){
     if(!Array.isArray(values) || values.length===0) return null;
     const k = 2/(period+1);
@@ -138,96 +117,75 @@
     const isEmaCompressed = emaSpread < stdTh*1.5;
     return { consolidation: isStdTight && isAtrLow && isEmaCompressed, relativeStd, relativeAtr, emaSpread, mean, std };
   }
-  function rangeFromCandles(candles){
-    const highs = candles.map(c=>parseFloat(c.h));
-    const lows = candles.map(c=>parseFloat(c.l));
-    return {res: Math.max(...highs), sup: Math.min(...lows)};
+  function rangeFromCandles(candles){ const highs=candles.map(c=>parseFloat(c.h)); const lows=candles.map(c=>parseFloat(c.l)); return {res:Math.max(...highs), sup:Math.min(...lows)}; }
+  function volMA(candles, n=20){ if(!candles || candles.length===0) return 0; const vols=candles.map(c=>parseFloat(c.v)); const sub=vols.slice(-n); return sub.reduce((a,b)=>a+b,0)/sub.length; }
+
+  // fetch exchange info and filter perp USDT symbols
+  async function fetchPerpSymbols(){
+    const url = 'https://fapi.binance.com/fapi/v1/exchangeInfo';
+    uiLog('Fetching exchange info from Binance...');
+    const resp = await fetch(url);
+    if(!resp.ok) throw new Error('exchangeInfo fetch failed: ' + resp.status);
+    const json = await resp.json();
+    // filter symbols: contractType PERPETUAL; symbol endsWith USDT
+    // NOTE: exchangeInfo for futures contains contracts entries under symbols array, with contractType property for each symbol
+    const syms = json.symbols.filter(s => {
+      // For Binance futures exchangeInfo, `symbol` typically present. There may also be `contractType` in the query param; if not, fallback to naming convention
+      const isUSDT = s.symbol && s.symbol.toUpperCase().endsWith('USDT');
+      const isPerp = (s.contractType && s.contractType.toUpperCase()==='PERPETUAL') || (s.contractType === undefined && s.symbol && s.symbol.toUpperCase().endsWith('USDT'));
+      return isUSDT && isPerp;
+    }).map(s => s.symbol.toLowerCase());
+    return syms;
   }
-  function volMA(candles, n=20){
-    if(!candles || candles.length===0) return 0;
-    const vols = candles.map(c=>parseFloat(c.v));
-    const sub = vols.slice(-n);
-    return sub.reduce((a,b)=>a+b,0)/sub.length;
+
+  // split into batches
+  function splitBatches(arr, size){
+    const out=[];
+    for(let i=0;i<arr.length;i+=size) out.push(arr.slice(i,i+size));
+    return out;
   }
 
-  // Start/Stop logic
-  function start(){
-    if(running){
-      uiLog('Already running');
-      return;
-    }
-    const symbol = (document.getElementById('symbol').value || 'btcusdt').toLowerCase();
-    const interval = document.getElementById('interval').value || '5m';
-    const lookback = parseInt(document.getElementById('lookback').value)||24;
-    const stdTh = parseFloat(document.getElementById('stdTh').value)||0.004;
-
-    const wsUrl = `wss://fstream.binance.com/ws/${symbol}@kline_${interval}`;
-    wsUrlEl.textContent = `WS URL: ${wsUrl}`;
-    uiLog(`Starting detector for ${symbol}@${interval} (lookback ${lookback})`);
-    setStatus('connecting', 'idle');
-
-    try{
-      ws = new WebSocket(wsUrl);
-    }catch(err){
-      uiLog('WebSocket construction failed: ' + err.message);
-      setStatus('stopped','stopped');
-      return;
-    }
-
-    const candles = [];
-
-    ws.onopen = function(){
-      running = true;
-      uiLog('WS OPEN');
-      setStatus('running', 'running');
-    };
-
-    ws.onerror = function(evt){
-      console.error('WS ERROR', evt);
-      uiLog('WebSocket error (check console).');
-      setStatus('stopped','stopped');
-    };
-
-    ws.onclose = function(ev){
-      uiLog(`WS CLOSED (code ${ev.code})`);
-      running = false;
-      setStatus('stopped','stopped');
-    };
-
-    ws.onmessage = function(evt){
+  // create combined ws for a batch of symbols for the selected interval
+  function createWsForBatch(symbolBatch, interval, stdTh, lookback){
+    // build streams like btcusdt@kline_1m/ethusdt@kline_1m
+    const streamNames = symbolBatch.map(s => `${s}@kline_${interval}`).join('/');
+    const url = `wss://fstream.binance.com/stream?streams=${streamNames}`;
+    uiLog(`Opening WS for batch (${symbolBatch.length}) ...`);
+    const ws = new WebSocket(url);
+    const candleStores = {}; // symbol -> list of recent candles
+    ws.onopen = ()=> uiLog(`WS OPEN (batch size ${symbolBatch.length})`);
+    ws.onerror = (e)=> uiLog('WS ERROR (batch) - check console');
+    ws.onclose = (ev)=> uiLog(`WS CLOSED (batch). code=${ev.code}`);
+    ws.onmessage = (evt)=>{
       try{
         const d = JSON.parse(evt.data);
-        if(!d.k) return;
-        const k = d.k;
+        // combined stream message shape: {stream: 'btcusdt@kline_5m', data: {k: {...}}}
+        const stream = d.stream;
+        const payload = d.data;
+        if(!payload || !payload.k) return;
+        const k = payload.k;
+        const sym = (stream.split('@')[0]).toLowerCase();
         const candle = {t:k.t, o:k.o, h:k.h, l:k.l, c:k.c, v:k.v, isFinal:k.x};
-
-        if(candles.length===0 || candles[candles.length-1].t !== candle.t) {
-          candles.push(candle);
-          if(candles.length>500) candles.shift();
+        if(!candleStores[sym]) candleStores[sym] = [];
+        const store = candleStores[sym];
+        if(store.length===0 || store[store.length-1].t !== candle.t){
+          store.push(candle);
+          if(store.length>500) store.shift();
         } else {
-          candles[candles.length-1] = candle;
+          store[store.length-1] = candle;
         }
-
-        // analyze only closed candles
         if(!candle.isFinal) return;
-
-        if(candles.length < lookback){
-          uiLog(`collected ${candles.length}/${lookback} closed candles`);
-          return;
-        }
-
-        const recent = candles.slice(-lookback);
+        if(store.length < lookback) return;
+        const recent = store.slice(-lookback);
         const cons = detectConsolidation(recent, stdTh);
         const r = rangeFromCandles(recent);
-        const vMA = volMA(candles, Math.min(40, candles.length));
+        const vMA = volMA(store, Math.min(40, store.length));
         const lastClose = parseFloat(candle.c);
         const lastVol = parseFloat(candle.v);
 
-        uiLog(`analyze: std=${cons.relativeStd.toFixed(6)} atr=${cons.relativeAtr.toFixed(6)} emaSpread=${cons.emaSpread.toFixed(6)}`);
-
         if(cons.consolidation){
-          setSignal(`Consolidation detected. Range ${r.sup.toFixed(6)} - ${r.res.toFixed(6)}. mean=${cons.mean.toFixed(6)}`,'warn');
-          localStorage.setItem('lastConsol_'+symbol, JSON.stringify({time:Date.now(), range:r, mean:cons.mean}));
+          setSignal(`${sym.toUpperCase()} consolidation: ${r.sup.toFixed(6)} - ${r.res.toFixed(6)} (std:${cons.relativeStd.toFixed(6)})`,'warn');
+          // optionally persist snapshot: localStorage.setItem(...)
         }
 
         const breakoutBuffer = 0.0005;
@@ -235,34 +193,67 @@
         const volConfirm = lastVol > Math.max(1.2*vMA, vMA + vMA*0.05);
 
         if(isBreakout && volConfirm){
-          setSignal(`Breakout confirmed! Close ${lastClose.toFixed(6)} > resistance ${r.res.toFixed(6)} with vol ${Math.round(lastVol)} (vMA ${Math.round(vMA)})`,'ok');
+          setSignal(`${sym.toUpperCase()} BREAKOUT confirmed. close ${lastClose.toFixed(6)} > ${r.res.toFixed(6)} vol ${Math.round(lastVol)}`,'ok');
         } else if(isBreakout && !volConfirm){
-          setSignal(`Potential breakout (price). Volume not strong enough. lastVol ${Math.round(lastVol)} vMA ${Math.round(vMA)}`,'warn');
+          setSignal(`${sym.toUpperCase()} breakout price but weak vol. lastVol ${Math.round(lastVol)} vMA ${Math.round(vMA)}`,'warn');
         }
 
-      }catch(e){
-        console.error('message handler error', e);
-        uiLog('Message parse error (see console).');
-      }
+      }catch(err){ console.error('batch message parse error', err); }
     };
+    return {ws, url, batchSymbols: symbolBatch};
   }
 
-  function stop(){
-    if(ws && ws.readyState === WebSocket.OPEN) {
-      uiLog('Closing WS...');
-      ws.close();
-    } else {
-      uiLog('No WS connection to close.');
+  async function startAll(){
+    if(running) { uiLog('Already running'); return; }
+    uiLog('Starting full symbols detector...');
+    setTimeout(()=>window.scrollTo(0,0), 100);
+    try{
+      allSymbols = await fetchPerpSymbols();
+      if(!allSymbols || allSymbols.length===0) { uiLog('No symbols found.'); return; }
+      uiLog(`Found ${allSymbols.length} USDT perpetual symbols (first 10): ${allSymbols.slice(0,10).map(s=>s.toUpperCase()).join(', ')}`);
+      infoEl.textContent = `Found ${allSymbols.length} symbols.`;
+    }catch(err){
+      uiLog('Failed to fetch symbols: ' + err.message);
+      return;
     }
-    running = false;
-    setStatus('stopped','stopped');
+
+    const interval = document.getElementById('interval').value || '5m';
+    const lookback = parseInt(document.getElementById('lookback').value)||24;
+    const stdTh = parseFloat(document.getElementById('stdTh').value)||0.004;
+    const batchSize = Math.max(8, parseInt(document.getElementById('batchSize').value)||60); // avoid tiny batch
+
+    const batches = splitBatches(allSymbols, batchSize);
+    uiLog(`Creating ${batches.length} websocket connections (batchSize ${batchSize}).`);
+
+    // close previous conns if any
+    stopAll();
+
+    // create all connections
+    for(const batch of batches){
+      try{
+        const conn = createWsForBatch(batch, interval, stdTh, lookback);
+        connections.push(conn);
+      }catch(e){
+        uiLog('Failed to open batch WS: ' + e.message);
+      }
+    }
+    running = true;
+    uiLog('All batch connections started. Monitor signals above.');
   }
 
-  document.getElementById('start').onclick = start;
-  document.getElementById('stop').onclick = stop;
+  function stopAll(){
+    running = false;
+    for(const c of connections){
+      try{ if(c.ws && c.ws.readyState === WebSocket.OPEN) c.ws.close(); }catch(e){}
+    }
+    connections = [];
+    uiLog('Stopped all connections.');
+  }
 
-  // quick hint for the user
-  uiLog('Detector loaded — click Start. Open DevTools → Console for more details.');
+  document.getElementById('start').onclick = startAll;
+  document.getElementById('stop').onclick = stopAll;
+
+  uiLog('Loaded. Click Start to begin fetching & subscribing to all USDT perpetual symbols.');
 })();
 </script>
 </body>
