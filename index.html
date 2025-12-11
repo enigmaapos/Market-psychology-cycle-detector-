@@ -84,14 +84,13 @@
 <label style="margin-left:8px">Sort by
   <select id="sortBy" style="margin-left:6px">
     <option value="score">Score</option>
-    <option value="volSpike">Vol Spike</option>
-    <option value="wickRatio">Wick Ratio</option>
-    <option value="ema70DistPct">EMA Distance</option>
-    <option value="rsi4h">RSI 4H</option>
-    <option value="rsi1d">RSI 1D</option>
-    <option value="funding">Funding Rate</option>
-    <option value="last">Last Price</option>
-    <option value="change24">24h Change</option>
+    <option value="similarity">Cycle similarity</option>
+    <option value="accum">Accum confidence</option>
+    <option value="preCrash">Pre-crash confidence</option>
+    <option value="rsi4h">RSI (4H)</option>
+    <option value="ema70DistPct">EMA stretch %</option>
+    <option value="last">Last price</option>
+    <option value="symbol">Symbol</option>
   </select>
 </label>
 <button id="sortDir" class="alt" title="Toggle sort direction" style="margin-left:6px">Desc</button>
@@ -1779,47 +1778,149 @@ function explainBlowoff(item){
    ============================================================ */
 
 // ===== Ready-to-replace JS: sorting, ranking, filtering, handlers =====
-// ------- Sorting helper (NEW) -------
-function applySort(results){
-  const field = el.sortField.value || 'score';
-  const order = el.sortOrder.value === 'asc' ? 1 : -1;
 
-  // getter for primary field
-  const getter = (r) => {
-    if(field === 'score') return r.score ?? -Infinity;
-    if(field === 'volSpike') return r.volSpike ?? -Infinity;
-    if(field === 'wickRatio') return r.wickRatio ?? -Infinity;
-    if(field === 'ema70DistPct') return r.ema70DistPct ?? -Infinity;
-    if(field === 'rsi4h') return r.rsi4h ?? -Infinity;
-    if(field === 'rsi1d') return r.rsi1d ?? -Infinity;
-    if(field === 'funding') return r.funding ?? -Infinity;
-    if(field === 'last') return r.last ?? -Infinity;
-    if(field === 'change24') return r.change24 ?? -Infinity;
-    return r.score ?? -Infinity;
-  };
+// default sort direction
+let sortDesc = true; // Desc by default
 
-  // sort with primary key then stable tie-breakers (score desc, volSpike desc, ema70DistPct desc)
-  results.sort((a,b)=>{
-    const va = getter(a);
-    const vb = getter(b);
+// ---- helpers: phase ranking / normalization ----
+function getPhaseRank(phase) {
+  if(!phase) return 999;
+  const p = (typeof phase === 'object') ? (phase.phaseName || phase.phase || '') : phase;
+  const s = String(p).toLowerCase();
+  if(s.includes('blowoff')) return 1;
+  if(s.includes('distribution')) return 2;
+  if(s.includes('trend') || s.includes('early pump') || s.includes('takeoff')) return 2.5;
+  if(s.includes('breakdown')) return 3;
+  if(s.includes('crash')) return 4;
+  if(s.includes('post-crash') || s.includes('flatline') || s.includes('post')) return 5;
+  const m = s.match(/\d+/);
+  if(m) return Number(m[0]);
+  return 999;
+}
 
-    const na = (va === null || va === undefined || Number.isNaN(va));
-    const nb = (vb === null || vb === undefined || Number.isNaN(vb));
-    if(na && nb) return 0;
-    if(na) return 1 * order; // push missing to end
-    if(nb) return -1 * order;
+function getSimPhaseRank(simPhase) {
+  if(!simPhase) return 999;
+  const s = String(simPhase).toLowerCase();
+  if(s.includes('blowoff')) return 1;
+  if(s.includes('distribution')) return 2;
+  if(s.includes('trend') || s.includes('early pump')) return 2.5;
+  if(s.includes('breakdown')) return 3;
+  if(s.includes('crash')) return 4;
+  return 999;
+}
 
-    // compare primary
-    if(typeof va === 'string' && typeof vb === 'string'){
-      const cmp = va.localeCompare(vb);
-      if(cmp !== 0) return cmp * order;
-    } else {
-      if(vb - va !== 0) return (va - vb) * order;
+// helper to extract value for sort key
+function getValueForKey(r, key) {
+  if(!r) return null;
+  switch(key){
+    case 'score': return r.score || 0;
+    case 'similarity': return (r.similarity||0);
+    case 'accum': return (r.accumCombined && r.accumCombined.confidence) ? r.accumCombined.confidence : 0;
+    case 'preCrash': return (r.preCrash && (typeof r.preCrash.confidence !== 'undefined')) ? r.preCrash.confidence : ((r.preCrash && typeof r.preCrash.score !== 'undefined') ? r.preCrash.score : 0);
+    case 'rsi4h': return r.rsi4h || 0;
+    case 'ema70DistPct': return Math.abs(r.ema70DistPct || 0);
+    case 'last': return r.closeNow || 0;
+    case 'symbol': return (r.symbol || '').toUpperCase();
+
+    // phase text
+    case 'phase': {
+      if(!r.phase) return '';
+      if(typeof r.phase === 'string') return r.phase;
+      return (r.phase.phaseName || r.phase.phase || String(r.phase)).toString();
     }
 
-    // tie-breakers (always descending where meaningful)
-    const tie = (b.score - a.score) || (b.volSpike - a.volSpike) || (b.ema70DistPct - a.ema70DistPct);
-    return tie;
+    // simPhase text
+    case 'simPhase': return String(r.simPhase || '');
+
+    // numeric ranked phase (preferred for deterministic ordering)
+    case 'phaseRank': return getPhaseRank(r.phase);
+
+    case 'simPhaseRank': return getSimPhaseRank(r.simPhase);
+
+    default: return 0;
+  }
+}
+
+// main sort function (in-place)
+function sortResults(results) {
+  const key = (el.sortBy && el.sortBy.value) ? el.sortBy.value : 'score';
+  results.sort((a,b) => {
+    const A = getValueForKey(a,key);
+    const B = getValueForKey(b,key);
+
+    // alphabetical for symbol specifically
+    if(key === 'symbol'){
+      if(A < B) return sortDesc ? 1 : -1;
+      if(A > B) return sortDesc ? -1 : 1;
+      return 0;
+    }
+
+    // numeric (including phaseRank / simPhaseRank)
+    if(typeof A === 'number' && typeof B === 'number'){
+      if(A === B){
+        // tiebreakers: score desc, then similarity desc
+        const t = (b.score||0) - (a.score||0);
+        if(t !== 0) return t;
+        const s = (b.similarity||0) - (a.similarity||0);
+        return s;
+      }
+      return sortDesc ? (B - A) : (A - B);
+    }
+
+    // fallback string comparison (phase, simPhase, or other strings)
+    const sA = (A === null || typeof A === 'undefined') ? '' : String(A);
+    const sB = (B === null || typeof B === 'undefined') ? '' : String(B);
+    if(sA < sB) return sortDesc ? 1 : -1;
+    if(sA > sB) return sortDesc ? -1 : 1;
+    // final fallback tiebreakers
+    const t2 = (b.score||0) - (a.score||0);
+    if(t2 !== 0) return t2;
+    return (b.similarity||0) - (a.similarity||0);
+  });
+}
+
+// ====== Filtering: show only Distribution / Breakdown when toggled ======
+let showOnlyDist = false;
+const distKeywords = ['distribution', 'breakdown'];
+
+function filterResultsForDist(results) {
+  if(!showOnlyDist) return results;
+  return results.filter(r => {
+    const phaseText = (() => {
+      if(!r) return '';
+      if(r.phase){
+        if(typeof r.phase === 'string') return r.phase.toLowerCase();
+        if(typeof r.phase === 'object') return (r.phase.phaseName || r.phase.phase || '').toString().toLowerCase();
+      }
+      if(r.simPhase) return r.simPhase.toString().toLowerCase();
+      return '';
+    })();
+    return distKeywords.some(k => phaseText.includes(k));
+  });
+}
+
+// ===== Wire controls: sortDir, sortBy, showDistBtn =====
+if(el.sortDir){
+  el.sortDir.addEventListener('click', () => {
+    sortDesc = !sortDesc;
+    el.sortDir.innerText = sortDesc ? 'Desc' : 'Asc';
+    if(window.lastScanResults){
+      const arr = filterResultsForDist(window.lastScanResults.slice());
+      sortResults(arr);
+      if(window.innerWidth >= 680) renderTable(arr); else renderCards(arr);
+      updateTradingInterpretation(arr);
+    }
+  });
+}
+
+if(el.sortBy){
+  el.sortBy.addEventListener('change', () => {
+    if(window.lastScanResults){
+      const arr = filterResultsForDist(window.lastScanResults.slice());
+      sortResults(arr);
+      if(window.innerWidth >= 680) renderTable(arr); else renderCards(arr);
+      updateTradingInterpretation(arr);
+    }
   });
 }
 
