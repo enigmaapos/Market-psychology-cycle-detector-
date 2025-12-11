@@ -2359,6 +2359,11 @@ try {
 
 /* UI events */
   // wire buttons (call after DOM ready)
+// Sorting controls: re-render on change
+el.sortField.addEventListener('change', ()=>{ if(window.lastResults) renderResults(window.lastResults); });
+el.sortOrder.addEventListener('change', ()=>{ if(window.lastResults) renderResults(window.lastResults); });
+  
+  
 el.scanTopGreenBtn = document.getElementById('scanTopGreenBtn');
 el.scanTopRedBtn   = document.getElementById('scanTopRedBtn');
 el.scanStatus = document.getElementById('scanStatus');
